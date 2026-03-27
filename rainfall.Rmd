@@ -1,0 +1,869 @@
+---
+title: "Rainfall"
+author: "Riccardo Ravelli (895140), Luca Cicu (895545), Lorenzo Zanotti (902652)"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduzione
+
+Il seguente report esamina il dataset Hong Kong Rainfall Dataset (<https://www.kaggle.com/datasets/act18l/hongkongrainfall/data>) contenente i dati quotidiani storici relativi a rilevazioni atmosferiche nella città di Hong Kong.
+
+Per comprendere meglio la natura dei dati offriamo una breve introduttiva sulla città. Situata lungo la costa del sud-est della Cina, Hong Kong ha un clima subtropicale umido influenzato fortemente dai monsoni. La città ha estati caldissime ed umide di lunga durata, accompagnate generalmente da inverni secchi e temperati.
+
+La stagione delle piogge tra maggio e settembre coincide, invece, con la maggior esposizione della città ai monsoni di sud-ovest e ai tifoni che possono causare intensi eventi di pioggia in tempi relativamente corti.
+
+### Il Dataset
+
+Il dataset comprende 3591 osservazioni sull'andamento meteorologico di Hong Kong relative al periodo temporale tra il 1° Gennaio 2010 e il 31 Ottobre 2019 , ognuna della quali con 17 caratteristiche:
+
+1.  Year: anno relativo alla rilevazione
+
+2.  Month: mese relativo alla rilevazione
+
+3.  Day: giorno relativo alla rilevazione
+
+4.  Pressure: pressione (hPa)
+
+5.  Maxtemp: temperatura massima misurata in quella giornata (°C)
+
+6.  Temperature: temperatura media giornaliera (°C)
+
+7.  Mintemp: temperatura minima misurata in quel giorno (°C)
+
+8.  Dewpoint: punto di rugiada (temperatura a cui inizia la condensazione) (°C)
+
+9.  Humidity: livello di umidità (%)
+
+10. Cloud: percentuale di nuvolosità giornaliera (%)
+
+11. Rainfall: livello di precipitazioni (mm)
+
+12. Low.visibility.hour: ore a bassa visibilità
+
+13. Sunshine: ore con presenza di sole 
+
+14. Radiation: radiazione solare (MJ/m\^2)
+
+15. Evaporation: quantità di acqua evaporata (mm)
+
+16. Winddirection: direzione del vento (°)
+
+17. Windspeed: velocità del vento (km/h)
+
+La variabile risposta sarà *rainfall* che suddivideremo in 3 livelli: "Non piove", "Piove" e "Diluvia". Essi son stati identificati seguendo le linee guida generali della meteorologia.
+
+## Data Preparation
+
+### Librerie
+
+Le librerie usate sono le seguenti, a cui andranno aggiunte quelle relative alla fase di modellistica.
+
+```{r, results = F, message=F}
+library(tidyverse)
+library(visdat)
+library(naniar)
+library(UpSetR)
+library(ggcorrplot)
+library(mice)
+library(cowplot)
+library(GGally)
+library(ggfortify)
+```
+
+### Import del dataset e pulizia
+
+```{r}
+rain <- read.csv("hongkong.csv", header = T, sep = ";")
+```
+
+Controlliamo in che maniera sono state importate le variabili per andare ad aggiustare eventuali problemi .
+
+```{r}
+str(rain)
+```
+
+Notiamo che sono presenti degli errori con rainfall (chr), sushine (chr), radiation (chr), evaporation (chr) perchè dovrebbero essere dati numerici.
+
+Andiamo a risolvere i problemi per ogni variabili.
+
+##### rainfall
+
+```{r}
+# Non piove
+rain$rainfall[rain$rainfall == "-"] <- 0                        
+# Piove
+rain$rainfall[rain$rainfall == rain$rainfall[1]] <- 1           
+rain$rainfall[rain$rainfall > 0 & rain$rainfall <= 20] <- 1     # Diluvia
+rain$rainfall[rain$rainfall > 20] <- 2                          
+
+rain$rainfall <- as.factor(rain$rainfall)
+```
+
+##### sunshine
+
+```{r}
+rain$sunshine[rain$sunshine == "-"] <- 0
+rain$sunshine <- as.numeric(rain$sunshine)
+```
+
+##### radiation
+
+```{r, warning=F, results=F, message=F}
+rain |> 
+   select(radiation) |> 
+   mutate(filtro = as.numeric(radiation)) |> 
+   filter(is.na(filtro))
+rain$radiation[rain$radiation == "8.89&"] <- 8.89
+rain$radiation <- as.numeric(rain$radiation)
+```
+
+##### evaporation
+
+```{r}
+rain <- rain |>
+   mutate(evaporation = na_if(evaporation, "N/A")) |> 
+   mutate(evaporation = na_if(evaporation, "N.A.")) 
+rain$evaporation <- as.numeric(rain$evaporation)
+```
+
+##### month
+
+```{r}
+rain$month <- as.factor(rain$month)
+```
+
+In questo modo abbiamo convertito le variabili character in variabili quantitative e la variabile *month* in variabile factor. Inoltre abbiamo reso la variabile *rainfall* qualitativa con 3 possibili valori:
+
+-   **0** corrisponde a "Non ha piovuto", quindi 0 mm di pioggia;
+
+-   **1** corrisponde a "Pioggia", maggiore di 0 mm e minore o uguale a 20 mm;
+
+-   **2** corrisponde a "Diluvia", con più di 20 mm di pioggia.
+
+Controlliamo se ora le variabili corrispondono a quanto ci aspettavamo.
+
+```{r}
+str(rain)
+```
+
+Ora le variabili sono espresse nel giusto modo.
+
+```{r}
+summary(rain)
+```
+
+Notiamo che *pressure* è la variabile con i valori più distanti da quelli delle altre varaibili, inoltre *maxtemp*, *temparature*, *mintemp* e *dewpoint* hanno più o meno lo stesso range di variazione. La variabile risposta *rainfall* presenta classi sbilanciate, problema che risolveremo più avanti. Tutto sommato le variazioni sembrano essere opportune al tipo di variabile.
+
+### Train e test
+
+Prima di procedere con ogni tipo di analisi suddividiamo il dataset in train set e test set, in modo da non rendere più significative alcune stime di quanto in realtà sono. Come train set teniamo il 70% delle osservazioni totali, lasciando quindi il restante 30% al test set.
+
+```{r}
+set.seed(123)
+index <- sample(1:nrow(rain), 0.7 * nrow(rain))
+t.rain <- rain[index, ]
+test <- rain[-index, ]
+```
+
+Andiamo ad aggiustare lo sbilanciamento delle classi già osservato in precedenza tramite oversampling delle osservazioni relative a più di 20 mm di pioggia, quindi appartententi a *rainfall=2*.
+
+```{r, results = F}
+table(t.rain$rainfall)
+round(prop.table(table(t.rain$rainfall)), 2)
+round(prop.table(table(test$rainfall)), 2)
+
+# Oversampling
+diluvia <- t.rain |> 
+   filter(rainfall == 2) |> 
+   sample_n(500, replace = T)
+t.rain <- t.rain |> 
+   add_row(diluvia)
+rm(diluvia)
+```
+
+```{r}
+table(t.rain$rainfall)
+round(prop.table(table(t.rain$rainfall)), 2)
+```
+
+Le classi ora sono più bilanciate, forse leggermente sbilanciate per via delle osservazioni relative a "piove", ma nulla che potrebbe creare problemi.
+
+D'ora le analisi saranno svolte solo sul train set, andando successivamente a replicare sul test set per poter avere le stesse variabili eventualmente trasformate in ugual misura.
+
+### Trattamento Missing Values
+
+Dal *summary* precedente abbiamo notato la presenza di valori mancanti.
+
+```{r, message=F}
+upset(as_shadow_upset(t.rain))
+```
+
+La variabile con più valori mancanti è *evaporation*, tuttavia rispetto al numero totale di osservazioni rappresentano un numero basso, per questo motivo anche eliminandole non si avrebbe alcun problema, tuttavia proviamo comunque a imputare i valori mancanti. Controlliamo le correlazioni tra le variabili.
+
+```{r}
+ggcorrplot(cor(na.omit(t.rain[, -c(1, 2, 3, 11)])), type = "upper", lab = T)
+```
+
+Vediamo che *evaporation* è correlata positivimante in particolar modo con *sunshine* e *radiation*, il che è auspicabile, infatti più ore di sole ci sono durante la giornata e più millimetri di acqua sono evaporati e vien da sè che l'energia solare totale sia maggiore. Grazie a questa informazione possiamo ipotizzare di imputare i valori mancanti tramite il metodo di imputazione per regressione.
+
+```{r, message=F, warning=F}
+ggplot(t.rain, aes(x = radiation, y = evaporation)) +
+   geom_point() +
+   geom_smooth(se = F, method = "lm")
+```
+
+Imputiamo quindi i valori mancanti con questo metodo, ricordandoci anche del valore mancante in *windspeed*. Scegliamo per cui le variabili più correlate a queste due.
+
+```{r, results=F}
+imp <- mice(t.rain[, c(5, 10, 12, 14, 15)], method = "norm.predict", m = 1, maxit = 1)
+data <- complete(imp)
+data$evaporation <- round(data$evaporation, 1)
+```
+
+Confrontiamo la distribuzione originale di *evaporation* con la distribuzione dopo aver imputate i valori mancanti.
+
+```{r, warning=F}
+h1 <- ggplot(t.rain, aes(x = evaporation)) +
+   geom_histogram(fill = "#ad1538", color = "#000000", position = "identity", 
+                  bins = 20) +
+   ggtitle("Original distribution") +
+   theme_classic()
+h2 <- ggplot(data, aes(x = evaporation)) +
+   geom_histogram(fill = "#15ad4f", color = "#000000", position = "identity",
+                  bins = 20) +
+   ggtitle("norm.predict") +
+   theme_classic()
+plot_grid(h1, h2, nrow = 1)
+
+```
+
+La distribuzione rispecchia quella originale quindi possiamo andare a sostituire le variabili senza NA a quelle con NA.
+
+```{r}
+t.rain <- t.rain |> 
+   select(-c(12, 15)) |> 
+   add_column(data[, c(3, 5)])
+anyNA(t.rain)
+```
+
+Il training set non presenta valori mancanti quindi possiamo procedere le analisi con il pre-processing.
+
+### Pre-processing
+
+Per avere una prima idea di quali variabili possono essere più significative rispetto ad altre utilizziamo una grigli di boxplot condizionati per i tre valori di *rainfall*. Vogliamo che i boxplot siano assumano valori molti differenti tra le varie classi.
+
+```{r}
+t.rain.long <- t.rain |> 
+   select(rainfall, where(is.numeric)) |> 
+   pivot_longer(cols = -rainfall, names_to = "var", values_to = "Values")
+
+ggplot(t.rain.long, aes(x = rainfall, y = Values, col = rainfall)) +
+   geom_boxplot(fill = "snow1", linewidth = 1,
+                outlier.color="black", outlier.shape = "*", outlier.size=5) +
+   facet_wrap(~ var, scales = "free_y") +
+   theme_minimal() 
+```
+
+Tra tutte le variabili notiamo che *day* e *year* sono quelle con valori più simili tra le tre classi, questo è anche logico, non ci aspettiamo che la quantità di pioggia dipenda dal giorno del mese o dall'anno. Una variabile molto problematica, con un numero eccessivo di outlier, è *low.visibility.hour*, avrà quindi bisogno di particolari attenzioni. Anche *windspeed* e *winddirection* non sembrano avere particolari differenze tra le varie classi, per cui dovremo approfondire anche queste.
+
+```{r}
+t.rain <- t.rain |> 
+   select(-c(day, year))
+```
+
+Analizziamo ora la struttura di correlazione tra le variabili quantitative.
+
+```{r}
+ggcorrplot(cor(t.rain[, -c(1, 9)]), type = "upper", lab = T)
+```
+
+La prima cosa che salta all'occhio è il triangolo in basso, contenente le correlazioni tra *pressure, maxtemp, temparature, mintemp* e *dewpoint.* Come si può immaginare le quattro variabili relative alla temperatura sono estremamente correlate positivamente l'una con l'altra e negativamente con *pressure.*
+
+Notiamo anche una forte correlazione positiva tra *sunshine* e *radiation,* e un forte correlazione, questa volta negativa, tra *sunshine* e *cloud.* Anche questa volta ce lo si poteva immaginare.
+
+Approfondiamo queste correlazioni in modo tale da poter rimuovere alcune variabili superflue, che potrebbero rendere alcuni metodi di classificazione (come il k-nn) particolarmente dispendiosi dal punto di vista computazionale.
+
+Effattuiamo la verifica grafica solo su 200 osservazioni estratte casualmente per rendere più veloce la creazione del grafico.
+
+```{r, results=F, message=F}
+ggp <- sample(1:nrow(t.rain), 200)
+ggpairs(t.rain[ggp, 2:6], aes(col = t.rain$rainfall[ggp]))
+```
+
+I grafici ci confermano quanto ipotizzato prima. Possiamo pensare di svolgere una PCA per sostituire le variabili legate alla temperatura con una sola variabile.
+
+```{r}
+pca <- princomp(as.matrix(t.rain[, 2:6]), cor = T)
+autoplot(pca, data = t.rain, colour = "rainfall", 
+         loadings = T, loadings.label = T, 
+         loadings.colour = 'orange', loadings.label.colour = 'orange')
+```
+
+La prima componente principale copre già più del 91% della variazione, quindi l'idea non è da scartare. Confrontiamo ulteriormente la *maxtemp* con la *temparature.*
+
+```{r}
+ggplot(t.rain, aes(x = temparature, y = maxtemp, col = rainfall)) +
+   geom_point()
+```
+
+A questo punto ha senso scartare le variabili *mintemp* e *maxtemp* conservando tuttavia la variazione di temperature durante la giornata, creando quindi una nuova variabile *diff.temp.*
+
+```{r}
+t.rain <- t.rain |> 
+   mutate(diff.temp = maxtemp - mintemp) |> 
+   select(-c(maxtemp, mintemp))
+ggplot(t.rain, aes(x = temparature, y = diff.temp, col = rainfall)) +
+   geom_point()
+```
+
+Il grafico a dispersione ci mostra come la correlazione tra *temparature* e *diff.temp* sia molto inferiore rispetto alla correlazione tra *temparature* e *maxtemp*, andando quindi a diminuire la dimensione del dataset e rendendo le variabili meno omogenee.
+
+```{r, message=F}
+ggpairs(t.rain[ggp, c(-1)], aes(col = t.rain$rainfall[ggp]))
+```
+
+Da questo grafico molto inforamativo notiamo, come già visto in precedenza, che le variabili *low.visibility.hour* e *windspeed* sono quelle meno significative per quanto riguarda la classificazione delle osservazioni nelle tre categorie di *rainfall.*
+
+```{r}
+pca <- princomp(as.matrix(t.rain[, -c(1, 7)]), cor = T)
+autoplot(pca, data = t.rain, col = "rainfall", 
+         loadings = T, loadings.label = T, 
+         loadings.colour = 'red3', loadings.label.colour = 'red3') + theme_bw()
+```
+
+La PCA mostra una chiara separazione tra le classi di pioggia. Le osservazioni senza pioggia (rosso) si associano a variabili come *sunshine, radiation ed evaporation,* mentre quelle con pioggia intensa (blu) sono legate a *humidity, cloud e windspeed*. Le prime due componenti spiegano oltre il 65% della varianza, evidenziando un buon potere descrittivo. Le frecce indicano la correlazione tra le variabili originali e le componenti principali, permettendo di interpretare facilmente le direzioni di variazione nei dati.
+
+Tornando ai boxplot continuiamo ora le analisi sulle singole variabili.
+
+```{r}
+t.rain.long <- t.rain |> 
+   select(rainfall, where(is.numeric)) |> 
+   pivot_longer(cols = -rainfall, names_to = "var", values_to = "Values")
+
+ggplot(t.rain.long, aes(x = rainfall, y = Values, col = rainfall)) +
+   geom_boxplot(fill = "snow1", linewidth = 1,
+                outlier.color="black", outlier.shape = "*", outlier.size=5) +
+   facet_wrap(~ var, scales = "free_y") +
+   theme_minimal() 
+```
+
+La più problematica è senza dubbio *low.visibility.hour,* con un eccesso di outlier, *windspeed* non sembra essere molto importante al fine di classificare le osservazioni nelle tre classi, *pressure* invece ha un range di variazione eccessivamente alto rispetto alle altre variabili, quindi dovrebbe essere gestito, così come anche *winddirection,* espressa in gradi da zero a 360, mentre *cloud* e *humidity* potrebbero essere riscalate per una maggior conformità di range.
+
+Prima di occuparci singolarmente dei vari problemi visualizziamo anche le curve di densità condizionate per classe di *rainfall*. Anche in questo caso come con i boxplot vorremmo curve di densità meno sovrapposte possibile, per poter identificare meglio le diverse categorie.
+
+```{r}
+t.rain.long <- t.rain |> 
+   select(rainfall, where(is.numeric)) |> 
+   pivot_longer(cols = -rainfall, names_to = "var", values_to = "Values")
+
+ggplot(t.rain.long, aes(x = Values, col = rainfall, fill = rainfall)) +
+   geom_density(alpha = 0.4) +
+   facet_wrap(~var, scales = "free") + 
+   labs(title = "Curve di densità per variabili numeriche",
+        x = "", y = "Densità")
+```
+
+Tra tutte quelle più rilevanti sembrano essere *humidity, radiation* e *sunshine,* mentre quelle meno rilevanti sembrano essere *low.visibility.hour* e *windspeed.*
+
+Valutiamo se tenere *low.visibility.hour* o rimuoverla.
+
+```{r}
+ggplot(t.rain, aes(x = low.visibility.hour , y = after_stat(density), fill = rainfall, col = rainfall)) +
+   geom_density(alpha = .4)
+```
+
+Presenta un eccesso di zeri e di outlier, quindi per i metodi che andremo a implementare risulta inutile, per cui la possiamo rimuovere.
+
+```{r}
+t.rain <- t.rain |> 
+   select(-low.visibility.hour)
+```
+
+Valutiamo *windspeed.*
+
+```{r}
+ggplot(t.rain, aes(x = windspeed , y = after_stat(density), fill = rainfall, col = rainfall)) +
+   geom_density(alpha = .4)
+```
+
+Nonostante si possa pensare che la velocità del vento possa influire sulla quantità di pioggia durante una giornate, le curve di densità condizionate ci portano ad eliminare tale variabile.
+
+```{r}
+t.rain <- t.rain |> 
+   select(-windspeed)
+```
+
+Concentriamo ora su *pressure* per rendere i valori non troppo diversi da quelli delle altre variabili.
+
+```{r}
+summary(t.rain$pressure)
+
+ggplot(t.rain, aes(x = pressure , y = after_stat(density))) +
+   geom_density(alpha = .4)
+
+```
+
+Non sembra distribuita normalmente quindi la normalizzeremo, tenendo un range da zero a 10 per omogeneità con altre variabili.
+
+```{r}
+norm <- function(x) {
+   return ((x - min(x)) / (max(x) - min(x)) * 10)
+}
+t.rain$pressure <- norm(t.rain$pressure)
+```
+
+Occupiamoci ora di *winddirection*. Visualizziamo questa variabile tramite un barplot con coordinate polari, in modo da comprendere se la direzione da cui tira il vento cambia effettivamente tra le tre classi.
+
+```{r, warning=F}
+dir.ven <- t.rain |> 
+   mutate(wind.cut = cut(winddirection, breaks = seq(0, 360, by = 15), 
+                         include.lowest = TRUE, right = FALSE))
+
+dir.ven.n <- dir.ven |> 
+   group_by(rainfall) |> 
+   count(wind.cut) |> 
+   mutate(angle = as.numeric(gsub("\\[|\\(|,.*", "", wind.cut)), 
+          angle_rad = angle * pi / 180)
+add.d <- dir.ven.n |> 
+   group_by(rainfall) |> 
+   summarize(div = sum(n))
+dir.ven.n <- dir.ven.n |> 
+   full_join(add.d, by = "rainfall")
+
+ggplot(dir.ven.n, aes(x = angle, y = n/div, fill = rainfall)) +
+   geom_bar(stat = "identity", width = 15, position = "identity", color = "black") +
+   coord_polar(start = 2*pi) +
+   facet_wrap(~ rainfall) +
+   scale_x_continuous(breaks = seq(0, 360 - 45, by = 45),
+                      labels = c("N", "NE", "E", "SE", "S", "SW", "W", "NW"),
+                      limits = c(0, 360)) +
+   theme_minimal() 
+```
+
+Risulta chiaro che quando non piove la direzione del vento è prevalentemente Nord-Est, mentre aumenta la frequenza di venti provenienti da Sud-Ovest nel caso di pioggia e in maniera ancor più evidente nel caso di diluvio. Per modelli che consentono l'utilizzo di variabili qualitative si potrebbe pensare di creare una variabile binaria con valori NE e SW.
+
+Dal grafico si può pensare di suddividere la variabile *winddirection* nel seguente modo: il primo livello NE assume i valori da 0° a 135° e da 316° a 360°, mentre il secondo livello SW assume i rimanenti valori da 136° a 315°.
+
+```{r}
+t.rain$winddirection.b <- as.factor(ifelse(t.rain$winddirection <= 135 | t.rain$winddirection > 315, "NE", "SW"))
+```
+
+Per quanto riguarda *cloud* e *humidity,* espresse in percentuale, si possono riscalare di un fattore 10 in modo tale che anch'esse siano più conformi con le altre in termini di range.
+
+```{r}
+t.rain$humidity <- t.rain$humidity / 10
+t.rain$cloud <- t.rain$cloud / 10
+```
+
+Infine può essere comodo a fini interpretativi e per semplicità computazionale utilizzare le stagioni al posto dei mesi.
+
+```{r}
+t.rain$month <- as.factor(t.rain$month)
+t.season <- tibble(month = as.factor(1:12), season = c(1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 1, 1))
+t.rain <- t.rain |> 
+   full_join(t.season, by = "month") |> 
+   select(-month)
+t.rain$season <- as.factor(t.rain$season)
+levels(t.rain$season) <- c("Inverno", "Primavera", "Estate", "Autunno")
+```
+
+### Data preparation test
+
+Prima di procedere alla fase di modellistica è necessario effettuare ogni modifica fatta sul train set anche sul test set.
+
+```{r}
+upset(as_shadow_upset(test))
+```
+
+Sapendo che *windspeed* sarà rimossa possiamo procedere all'imputazione dei valori mancanti solo sulla variabile *evaporation* anche in questo caso con il metodo della regressione.
+
+```{r, results=F}
+test <- select(test, -windspeed)
+imp <- mice(test[, c(5, 10, 14, 15)], method = "norm.predict", m = 1, maxit = 1)
+data <- complete(imp)
+data$evaporation <- round(data$evaporation, 1)
+test <- test |> 
+   select(-evaporation) |> 
+   add_column(data[, 4]) |> 
+   rename(evaporation = `data[, 4]`)
+anyNA(test)
+```
+
+Ora invece rimuoviamo le variabili che abbiamo deciso di non tenere in considerazione, normalizziamo *pressure* e riscaliamo *humidity* e *cloud*.
+
+```{r}
+test <- test |> 
+   mutate(diff.temp = maxtemp - mintemp) |> 
+   select(-c(day,year,mintemp,maxtemp,low.visibility.hour)) |> 
+   mutate(pressure = norm(pressure), humidity = humidity/10, cloud = cloud/10)
+```
+
+Sostituiamo le stagioni ai mesi.
+
+```{r}
+test$month <- as.factor(test$month)
+t.season <- tibble(month = as.factor(1:12), season = c(1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 1, 1))
+test <- test |> 
+   full_join(t.season, by = "month") |> 
+   select(-month)
+test$season <- as.factor(test$season)
+levels(test$season) <- c("Inverno", "Primavera", "Estate", "Autunno")
+```
+
+E creiamo la variabile qualitativa relativa a *windspeed.*
+
+```{r}
+test$winddirection.b <- as.factor(ifelse(test$winddirection <= 135 | test$winddirection > 315, "NE", "SW"))
+```
+
+A questo punto possiamo eliminare tutte le variabili del Global Environment che non ci servono per tenere solo *t.rain* e *test.*
+
+```{r}
+rm(list = ls()[!(ls() %in% c("t.rain", "test"))])
+```
+
+Infine, prima di procedere alla fase di modellizzazione, rinominiamo i livelli della variabile risposta in "No", "Piove" e "Diluvia".
+
+```{r}
+levels(t.rain$rainfall) <- c("No", "Piove", "Diluvia")
+levels(test$rainfall) <- c("No", "Piove", "Diluvia")
+```
+
+## Modelling
+
+Per i nostri fini di classificazione utilizzeremo diverse tecniche, sia parametriche che non-parametriche, in modo da poter confrontare nella fase di evaluation come diversi approcci sullo stesso dataset possono produrre risultati differenti.
+
+Le tecniche che utilizeremo sono: Regressione Logistica Multinomiale, Linear Discriminant Analisys, Quadratic Discriminant Analysis, Alberi Decisionali e K-NN.
+
+### Regressione Logistica Multinomiale
+
+La scelta della regressione logistica multinomiale è stata fatta in quanto la variabile risposta presenta tre diversi livelli, per cui una classica regressione logistica binaria non sarebbe stata opportuna.
+
+Il modello che utilizzeremo sarà implementato grazie alla libreria *nnet* mentre le confusion matrix saran calcolate tramite la funzione *confusionMatrix* della libreria *caret*
+
+```{r, message=F}
+library(nnet)
+library(caret)
+```
+
+Stimiamo ora i parametri tramite la funzione *multinom*.
+
+```{r, message=F}
+mod <- multinom(rainfall ~ . - winddirection, data = t.rain)
+summary(mod)
+```
+
+Calcoliamo i p-value per vedere la significatività dei parametri.
+
+```{r}
+z.stat <- summary(mod)$coefficients / summary(mod)$standard.errors
+(p.value <- (1 - pnorm(abs(z.stat), 0, 1)) * 2)
+```
+
+L'analisi dei p-value mostra che molte variabili metereologiche risultano statisticamente significative nel distinguere le condizioni "Piove" e "Diluvia" rispetto alla baseline "No". In particolare le variabili *cloud*, *humidity*, *diff.temp* e le stagioni (*Estate*, *Autunno*) giocano un ruolo importante in entrambi i modelli. Per "Diluvia", il modello è supportato da una maggior quantità di variabili significativamente associate, suggerendo una correlazione più marcata con le condizioni atmosferiche.
+
+Passiamo ora invece alla parte di previsione sul test set.
+
+```{r}
+test.p <- predict(mod, newdata = test, type = "class")
+confusionMatrix(test.p, test$rainfall)
+```
+
+Otteniamo un'accuracy del 65%, un valore non elevato. Notiamo immediatamente che la maggior parte degli errori è stata commessa per il livello "Piove", caratterizzato da una sensitivity del 58%, ben più bassa rispetto al 72% di "No" e al 67% di "Diluvia". I problemi principali si riscontrano quando vieni previsto il valore "Diluvia" ma in realtà ha piovuto o quando si prevede "Piove" ma in realtà non ha piovuto.
+
+Proviamo a effettuare una feature selection tramite una selezione stepwise.
+
+```{r, message = F, results=F}
+mod.s <- step(mod, trace = F)
+```
+
+Non viene eliminata nessuna covariata.
+
+Proviamo a visualizzare i risultati proiettando le osservazioni su *temparature* e su *humidity.*
+
+```{r, message=F}
+library(mclust)
+par(mfrow = c(1, 2))
+coordProj (test, dimens=c(2, 4), what="classification",
+           classification = test$rainfall,
+           col=c("red2","dodgerblue2","green3"), symbols=c(17 ,0,16),
+           sub="(a) true classification")
+coordProj (test, dimens=c(2, 4), what="classification",
+           classification = test.p,
+           col=c("red2","dodgerblue2","green3"), symbols=c(17 ,0,16),
+           sub="(b) mulinom classification")
+miss_class <- classError(test.p, class=test$rainfall)$misclassified
+points(test[miss_class, c(2, 4)], pch=19, cex = 0.3)
+par(mfrow = c(1, 1))
+```
+
+Notiamo che la maggior parte degli errori viene commessa con alti valori sia di *temparature* che di *humidity,* proprio dove parecchie osservazioni di tutte e tre le classi si sovrappongono.
+
+### LDA e QDA
+
+##### Verifica delle assunzioni
+
+In questa parte verifichiamo le assunzioni per poter applicare l'analisi discriminante lineare (LDA - linear discriminant analysis) e l'analisi discriminante quadratica (QDA - quadratic discriminant analysis).\
+Per avere una prima idea circa la variabilità verifichiamo se le nostre variabili hanno varianza comune utilizzando i boxplot condizionati alla classe.
+
+```{r, warning=F}
+library(gridExtra)
+
+plot_box_all <-list()
+variables <- colnames(t.rain)[-c(6,12, 13)]
+
+for (i in variables){
+  plot_box_all[[i]] <- ggplot(t.rain, aes_string(x = "rainfall", y = i, col = "rainfall", fill = "rainfall")) + 
+    geom_boxplot(alpha = 0.2) + 
+    theme(legend.position = "none") + 
+    scale_color_manual(values = c("blue", "red","green")) 
+  scale_fill_manual(values = c("blue", "red","green"))
+}
+
+do.call(grid.arrange, c(plot_box_all, nrow = 3))
+
+```
+
+Come si può notare a livello grafico quasi tutte le variabili non sembrano condividere una varianza comune condizionatamente alle classi.
+
+Successivamente verifichiamo graficamente se la covarianza tra le variabili può essere considerata in comune o meno. Dall'analisi grafica notiamo che non sembra essere soddisfatta la condizione di covarianza in comune. Le ellissi rappresentate, infatti, sembrano sempre diverse condizionatamente alla classe.
+
+```{r, message=F, warning=F}
+library(heplots)
+
+covEllipses(t.rain[, -c(6,12, 13)], 
+            factor(t.rain$rainfall), 
+            fill = TRUE, 
+            pooled = FALSE, 
+            col = c("blue", "red","green"), 
+            variables = 1:9, 
+            fill.alpha = 0.05)
+
+```
+
+Verifichiamo inoltre la normalità ispezionando le curve di densità: da tale rappresentazione si può vedere come la maggior parte delle variabili sembra non rispettare la condizione di normalità condizionata alla classe e, pertanto, è necessario testare la normalità tramite Shapiro-Wilk.
+
+```{r eval=FALSE, warning=FALSE, include=FALSE}
+plot_density <- list()
+
+for(i in variables){
+  plot_density[[i]] <- ggplot(t.rain, aes_string(x = i, y = "..density..", col = "rainfall")) + 
+    geom_density(aes(y = ..density..)) + 
+    scale_color_manual(values = c("blue", "red","green")) + 
+    theme(legend.position = "none")
+}
+
+do.call(grid.arrange, c(plot_density, nrow = 3))
+```
+
+```{r eval=FALSE, include=FALSE}
+pvalue_shapiro <- matrix(0, nrow = (dim(t.rain)[2]-3), ncol = 3)
+rownames(pvalue_shapiro) = colnames(t.rain)[-c(6,12, 13)]
+colnames(pvalue_shapiro) = c("0", "1", "2")
+
+for (i in colnames(t.rain)[-c(6,12, 13)]){
+  pvalue_shapiro[i, "0"] <- shapiro.test(t.rain[t.rain$rainfall == "0", i])$p.value
+  pvalue_shapiro[i, "1"] <- shapiro.test(t.rain[t.rain$rainfall == "1", i])$p.value
+  pvalue_shapiro[i, "2"] <- shapiro.test(t.rain[t.rain$rainfall == "2", i])$p.value
+}
+round(pvalue_shapiro, 6)
+
+```
+
+Dal test risulta che nessuna variabile è tale da accettare l'ipotesi nulla di normalità.
+
+Consapevoli dei potenziali errori (le variabili non accettano l'ipotesi di Shapiro) proviamo a valutare l'analisi discriminante quadratica, scartando quella lineare per via del fatto che le assunzioni di varianza in comune non vengono rispettate. A livello di variabili input escludiamo "season" poichè è qualitativa e utilizziamo tutte le altre e procediamo con la stima del modello QDA tramite la funzione qda(), che si trova all'interno della library(MASS).
+
+```{r}
+qda_model <- MASS::qda(rainfall ~ .-season, data = t.rain)
+qda_model
+
+
+pred.train = predict(qda_model, t.rain)$class 
+pred.test = predict(qda_model, test)$class
+
+calc_class_err = function(actual, predicted) { 
+  mean(actual != predicted)
+}
+
+calc_class_err(predicted = pred.train, actual = t.rain$rainfall) 
+(1 - calc_class_err(predicted = pred.train, actual = t.rain$rainfall)) * 100
+
+calc_class_err(predicted = pred.test, actual = test$rainfall) 
+(1 - calc_class_err(predicted = pred.test, actual = test$rainfall)) * 100
+
+table(predicted = pred.test, actual = test$rainfall)
+
+```
+
+La capacità di classificazione del training porta ad un'accuracy del 66.37%, mentre per quanto riguarda il test l'accuracy vale 62.43%. Questo risultato suggerisce che il QDA può essere utilizzato in modo esplorativo, specialmente quando si vuole modellare la struttura di covarianza separata per ogni classe, caratteristica che può risultare utile in presenza di gruppi eterogenei. È tuttavia importante sottolineare che l'efficacia del QDA potrebbe essere stata limitata dalla non normalità dei dati, fattore che rende il modello potenzialmente instabile. Per migliorare ulteriormente le prestazioni predittive, sarebbe opportuno confrontare il QDA con metodi alternativi come modelli non parametrici (es. k-NN) o anche modelli di regressione logistica multinomiale, che fanno assunzioni diverse e possono risultare più robusti.
+
+### KNN
+
+Per la classificazione KNN procediamo selezionando solo alcune variabili, basandoci su correlazioni e interpretabilità, visto che è un algoritmo che si basa sul calcolo di distanze. In particolare decidiamo di tenere come covariate *pressure, temparature, humidity, cloud, sunshine* e *diff.temp,* stando attenti a normalizzare per avere una misura unica di distanza.
+
+```{r}
+ttt.rain <- as.data.frame(scale(t.rain[,c(1, 2, 4, 5, 7, 11)]))
+ttt.rain$rainfall <- t.rain$rainfall
+```
+
+L'algoritmo prevede la divisione del training set in covariate e risposta. Inoltre scorporiamo il training ricavandone una versione più piccola, in modo tale da poter fare cross validation con l'obiettivo di trovare il numero di vicini ottimo in termini di training error.
+
+```{r}
+idx_smaller_trn = sample(nrow(ttt.rain),
+                         nrow(ttt.rain)*0.75) 
+smaller_trn =  ttt.rain[idx_smaller_trn, ] 
+vld = ttt.rain[-idx_smaller_trn, ] 
+X_smaller_trn = smaller_trn[, -5] 
+y_smaller_trn = smaller_trn$rainfall
+X_vld = vld[, -5] 
+y_vld = vld$rainfall
+X_tst = test[, -5] 
+y_tst = test$rainfall
+```
+
+Creiamo la funzione per calcolare errore di classificazione.
+
+```{r}
+calc_class_err = function(actual, predicted) { mean(actual != predicted) }
+```
+
+Il ciclo for successivo permette di stimare gli errori al variare di K, numero di vicini. Inoltre plottiamo il risultato per avere una visione d'insieme dei risultati.
+
+```{r}
+library(class)
+
+set.seed(123)
+k_to_try = 3:50
+err_k = rep(x = 0, times = length(k_to_try))
+for (i in seq_along(k_to_try)) {
+  pred = knn(train = X_smaller_trn[, -6],
+             test = X_vld[, -6], cl = y_smaller_trn,
+             k = k_to_try[i])
+  err_k[i] = calc_class_err(y_vld, pred) }
+
+plot(err_k, type = "b", col = "dodgerblue", cex = 1, pch = 20,
+     xlab = "k, number of neighbors", ylab = "classification error", 
+     main = "(Test) Error Rate vs Neighbors")
+
+abline(h = min(err_k), col = "darkorange", lty = 3)
+
+loess_fit <- loess(err_k ~ k_to_try) 
+k_smooth <- seq(min(k_to_try), max(k_to_try), length.out = 200)  
+err_smooth <- predict(loess_fit, newdata = k_smooth)  
+
+lines(k_smooth, err_smooth, col = "red", lwd = 2)
+
+```
+
+```{r}
+min(err_k)
+which(err_k == min(err_k))
+```
+
+Individuiamo l'errore minimo, in questo caso 0.327 che corrisponde al valore di k=3, un valore relativamente basso che potrebbe tendere all'overfitting.
+
+Classifichiamo in base al k scelto, e calcoliamo l'errore di classificazione nel training.
+
+```{r}
+pred <- knn(train = X_smaller_trn[, -6],
+           test = X_vld[, -6], cl = y_smaller_trn,
+           k = 3, prob = TRUE)
+
+test_error_rate <- calc_class_err(actual = y_vld, predicted = pred)
+test_error_rate
+test_error_rate*100
+
+conf_matrix = table(pred, y_vld)
+conf_matrix
+
+accuracy <- function(x){sum(diag(x)/(sum(rowSums(x)))) * 100}
+accuracy(conf_matrix)
+
+```
+
+Individuato il k ottimale, stimiamo KNN sul training set completo, per poi testarlo successivamente.
+
+```{r}
+X_trn <- ttt.rain[,-6]
+y_trn <- ttt.rain$rainfall
+X_tst <- test[,c(1, 2, 4, 5, 7, 11)]
+
+pred <- knn(train = X_trn[, -6],
+           test = X_tst[, -6], cl = y_trn,
+           k = 3, prob = TRUE)
+
+test_error_rate
+conf_matrix <- table(pred, y_tst)
+conf_matrix
+
+accuracy(conf_matrix)
+
+```
+
+Il valore di accuracy è del 31%, indicando quindi una tendenza all'overfitting. KNN sembra fare molta fatica a classificare quelle osservazioni appartenenti alla classe "No", ovvero non piove. Inoltre ci sono anche molti valori previsti come "Diluvia" quando in realtà sono "Piove". Comprendiamo quindi che il KNN prevede "Diluvia" per la maggior parte delle osservazioni, diventando quindi un classificatore poco affidabile.
+
+### Alberi Decisionali
+
+Ripuliamo l'environment.
+
+```{r}
+rm(list = ls()[!(ls() %in% c("t.rain", "test"))])
+```
+
+Procediamo con la stima di un modello ad alberi decisionali. L'algoritmo del pacchetto Tree seleziona in automatico le variabili grazie alle quali si ottengono migliori performance di classificazione in termini di riduzione dell'RSS.
+
+```{r}
+library(tree) 
+tree_t.rain <- tree(rainfall~.,t.rain[, -9]) 
+summary(tree_t.rain)
+```
+
+l'algoritmo allenato sul training set seleziona solo 4 variabili: *humidity, cloud, dewpoint,radiation.* La più importante è humidity che differenzia per prima lo spazio delle covariate. I nodi terminali sono 8, come si può facilmente visualizzare anche dal grafico. Vista la scarsa numerosità dei nodi, non risulta utile effettuare un pruning. Il missclassification error rate sul training è pari a 0.37.
+
+```{r}
+plot(tree_t.rain) 
+text(tree_t.rain, pretty = 0)
+```
+
+procediamo con il testare l'albero sul test set e conseguente calcolo di accuracy.
+
+```{r}
+tree.pred <- predict(tree_t.rain , test , type = "class") 
+table(tree.pred ,test[,"rainfall"]) 
+confusionMatrix(tree.pred ,test[,"rainfall"]) 
+```
+
+L'albero decisionale costruito mostra un'accuratezza complessiva pari al 59%, superiore al No Information Rate (45.7%), con un p-value quasi pari a zero, indicando che il modello è significativamente migliore di una classificazione casuale basata sulla classe prevalente.
+
+Analizzando singolarmente le prestazioni per ciascuna classe:
+
+-   "No": il modello mostra un'ottima *sensibility* (86.6%), indicando una buona capacità di individuare correttamente i casi in cui non piove. Tuttavia, la *precisione* è del 63.4%, segnalando la presenza di alcuni falsi positivi (soprattutto confusi con "Piove").
+
+-   "Piove": presenta una *sensibility* bassa (35.3%), il che significa che il modello fatica a riconoscere quando piove. Nonostante ciò, la *precisione* raggiunge il 67.2%, suggerendo che quando il modello prevede "Piove", spesso è corretto.
+
+-   "Diluvia": ha una *sensibility* discreta (63.96%) ma una *precisione* più bassa (43.6%), con una tendenza a confondere i casi con quelli della classe "Piove".
+
+Le *Balanced Accuracy* sono più alte per "No" (0.7924) e "Diluvia" (0.7273), mentre risultano più basse per "Piove" (0.6038), evidenziando come quest'ultima sia la classe più difficile da distinguere per il modello.
+
+## Evaluation
+
+Sono stati confrontati cinque modelli di classificazione, valutati esclusivamente sulla percentuale di accuratezza nel set di test:
+
+-   Regressione Logistica Multinomiale: 65%
+-   QDA (Quadratic Discriminant Analysis): 62%
+-   Albero Decisionale: 59%
+-   K-Nearest Neighbors (KNN): 31%
+
+La regressione logistica multinomiale ha mostrato le migliori prestazioni sul test, sebbene con margini modesti. Il KNN ha ottenuto risultati particolarmente bassi, indicando che i dati non sono ben separabili con metodi basati sulla distanza.
+
+## Conclusioni
+
+La classificazione della variabile *rainfall* si è dimostrata complessa, soprattutto per la classe intermedia ("piove"), spesso confusa con le altre. I modelli probabilistici (regressione logistica e QDA) si sono adattati meglio al problema rispetto ad alberi e KNN.
